@@ -1,10 +1,7 @@
 """
-Compare baseline NSL-KDD DNN vs improved setup: class weights, dropout, tuned hyperparameters.
+Compare baseline vs improved hybrid multiclass IDS (class weights + dropout tuning).
 
-Baseline: no dropout, no class_weight (original recipe).
-Improved: grid search with a fixed stratified validation split; best config chosen by
-validation attack recall (IDS-oriented), tie-broken by lower validation loss.
-Final improved model is retrained with the same hyperparameters + class_weight.
+Uses 5-class NSL-KDD labels, SMOTE on training data, and macro-F1 on validation.
 """
 
 from __future__ import annotations
@@ -13,165 +10,124 @@ from dataclasses import dataclass
 
 import numpy as np
 from sklearn.model_selection import train_test_split
-from sklearn.utils.class_weight import compute_class_weight
 from tensorflow.keras import utils as keras_utils
 
-from dnn_model import train_model
-from evaluate_dnn import compute_test_metrics
-from preprocess_nsl_kdd import get_preprocessed_train_test
-
-
-def binary_class_weights(y: np.ndarray) -> dict[int, float]:
-    """Keras `class_weight` dict for labels 0/1 (sklearn balanced formula)."""
-    y_flat = np.asarray(y).astype(int).ravel()
-    classes = np.array([0, 1])
-    w = compute_class_weight("balanced", classes=classes, y=y_flat)
-    return {int(c): float(wi) for c, wi in zip(classes, w)}
+from evaluate_dnn import compute_multiclass_metrics
+from hybrid_model import multiclass_class_weights, train_hybrid_model
+from preprocess_nsl_kdd import class_distribution, prepare_hybrid_dataset
+from smote_balance import print_smote_report
 
 
 @dataclass(frozen=True)
 class TuneConfig:
-    label: str
-    dropout_rates: tuple[float, float, float]
+    etiket: str
+    dropout: float
     learning_rate: float
-    hidden_units: tuple[int, int, int]
+    dnn_units: tuple[int, int, int]
 
 
-def best_val_loss(history) -> float:
-    return float(min(history.history["val_loss"]))
+def en_iyi_val_loss(gecmis) -> float:
+    return float(min(gecmis.history["val_loss"]))
 
 
 def main() -> None:
-    X_train, y_train, X_test, y_test = get_preprocessed_train_test()
-    cw = binary_class_weights(y_train)
+    print("Hibrit veri (SMOTE + pencere) yükleniyor…")
+    veri = prepare_hybrid_dataset(apply_smote=True)
+    if veri.smote_before:
+        print_smote_report(veri.smote_before, veri.smote_after)
 
-    # Fixed stratified train/val so every tuning trial sees the same validation fold.
-    X_tr, X_val, y_tr, y_val = train_test_split(
-        X_train,
-        y_train,
+    agirliklar = multiclass_class_weights(veri.y_train)
+    print("Dengeli sınıf ağırlıkları:", agirliklar)
+    print("Eğitim dağılımı:", class_distribution(veri.y_train))
+    print()
+
+    X_tr, X_val, X_seq_tr, X_seq_val, y_tr, y_val = train_test_split(
+        veri.X_train,
+        veri.X_seq_train,
+        veri.y_train,
         test_size=0.2,
-        stratify=y_train,
+        stratify=veri.y_train,
         random_state=42,
     )
 
-    print("Class counts (full train): normal(0) =", int((y_train == 0).sum()), " attack(1) =", int((y_train == 1).sum()))
-    print("Balanced class_weight:", cw)
-    print(f"Inner split for tuning: fit on {len(X_tr):,} rows, val on {len(X_val):,} rows (stratified).")
-    print()
-
-    # --- Baseline (before): no dropout, no class weighting ---
-    print("=== Baseline (before improvements) ===")
+    print("=== Taban çizgi (düşük dropout) ===")
     keras_utils.set_random_seed(42)
-    base_model, base_hist = train_model(
+    taban, taban_gecmis = train_hybrid_model(
         X_tr,
+        X_seq_tr,
         y_tr,
-        epochs=20,
-        validation_data=(X_val, y_val),
+        epochs=12,
+        validation_data=(X_val, X_seq_val, y_val),
         verbose=0,
-        early_stopping_verbose=0,
-        class_weight=None,
-        dropout_rates=None,
-        hidden_units=(128, 64, 32),
-        learning_rate=0.001,
+        class_weight=agirliklar,
+        dropout=0.15,
+        window_size=veri.window_size,
     )
-    base_metrics = compute_test_metrics(base_model, X_test, y_test)
-    base_val = compute_test_metrics(base_model, X_val, y_val)
+    taban_met = compute_multiclass_metrics(taban, veri.X_test, veri.X_seq_test, veri.y_test)
     print(
-        f"Test (baseline)   acc={base_metrics['accuracy']:.4f}  prec={base_metrics['precision']:.4f}  "
-        f"rec={base_metrics['recall']:.4f}  f1={base_metrics['f1']:.4f}  "
-        f"| val rec={base_val['recall']:.4f}  best val_loss={best_val_loss(base_hist):.4f}"
+        f"Test F1(macro)={taban_met['f1_macro']:.4f}  "
+        f"ROC-AUC={taban_met['roc_auc_ovr_macro']:.4f}  "
+        f"val_loss={en_iyi_val_loss(taban_gecmis):.4f}"
     )
     print()
 
-    candidates: list[TuneConfig] = [
-        TuneConfig("d0.25_lr1e3_h128", (0.25, 0.25, 0.25), 1e-3, (128, 64, 32)),
-        TuneConfig("d0.35_lr5e4_h128", (0.35, 0.35, 0.35), 5e-4, (128, 64, 32)),
-        TuneConfig("d0.2_lr1e3_h256", (0.2, 0.2, 0.2), 1e-3, (256, 128, 64)),
-        TuneConfig("d0.3_lr1e3_h64", (0.3, 0.3, 0.3), 1e-3, (64, 64, 32)),
-        TuneConfig("d0.15_lr1e3_h128", (0.15, 0.15, 0.15), 1e-3, (128, 64, 32)),
+    adaylar = [
+        TuneConfig("d0.25_lr1e-3", 0.25, 1e-3, (128, 64, 32)),
+        TuneConfig("d0.35_lr5e-4", 0.35, 5e-4, (128, 64, 32)),
+        TuneConfig("d0.2_h256", 0.2, 1e-3, (256, 128, 64)),
     ]
+    en_iyi: TuneConfig | None = None
+    en_iyi_skor = (-1.0, float("inf"))
 
-    print("=== Hyperparameter search (metric: maximize val attack recall; tie-break: lower val_loss) ===")
-    best_cfg: TuneConfig | None = None
-    best_score: tuple[float, float] = (-1.0, float("inf"))  # (val_recall, val_loss); tie-break via tuple compare
-
-    for i, cfg in enumerate(candidates):
+    print("=== Hiperparametre araması (makro F1) ===")
+    for i, cfg in enumerate(adaylar):
         keras_utils.set_random_seed(100 + i)
-        model, hist = train_model(
+        model, gecmis = train_hybrid_model(
             X_tr,
+            X_seq_tr,
             y_tr,
-            epochs=20,
-            validation_data=(X_val, y_val),
+            epochs=12,
+            validation_data=(X_val, X_seq_val, y_val),
             verbose=0,
-            early_stopping_verbose=0,
-            class_weight=cw,
-            dropout_rates=cfg.dropout_rates,
-            hidden_units=cfg.hidden_units,
+            class_weight=agirliklar,
+            window_size=veri.window_size,
             learning_rate=cfg.learning_rate,
+            dnn_units=cfg.dnn_units,
+            dropout=cfg.dropout,
         )
-        vm = compute_test_metrics(model, X_val, y_val)
-        tm = compute_test_metrics(model, X_test, y_test)
-        vloss = best_val_loss(hist)
-        score = (vm["recall"], -vloss)  # max recall, then max -vloss
-        print(
-            f"  [{cfg.label}] val_rec={vm['recall']:.4f}  val_loss={vloss:.4f}  "
-            f"test_rec={tm['recall']:.4f}  test_f1={tm['f1']:.4f}"
-        )
-        if score > (best_score[0], -best_score[1]):
-            best_score = (vm["recall"], vloss)
-            best_cfg = cfg
+        met = compute_multiclass_metrics(model, X_val, X_seq_val, y_val)
+        skor = (met["f1_macro"], en_iyi_val_loss(gecmis))
+        print(f"  [{cfg.etiket}] val F1={met['f1_macro']:.4f}  val_loss={skor[1]:.4f}")
+        if skor[0] > en_iyi_skor[0] or (skor[0] == en_iyi_skor[0] and skor[1] < en_iyi_skor[1]):
+            en_iyi_skor = skor
+            en_iyi = cfg
 
-    assert best_cfg is not None
-    print(
-        f"\nChosen: {best_cfg.label}  (val recall={best_score[0]:.4f}, "
-        f"best val_loss during that run={best_score[1]:.4f})"
-    )
-    print()
+    assert en_iyi is not None
+    print(f"\nSeçilen: {en_iyi.etiket}\n")
 
-    # --- Improved (after): same inner split + full training artifact for test comparison ---
-    print("=== Improved (after): best hparams + class_weight + dropout (same 80% fit / 20% val) ===")
+    print("=== İyileştirilmiş model (tam eğitim dilimi) ===")
     keras_utils.set_random_seed(999)
-    improved_model, improved_hist = train_model(
+    iyilestirilmis, _ = train_hybrid_model(
         X_tr,
+        X_seq_tr,
         y_tr,
-        epochs=20,
-        validation_data=(X_val, y_val),
+        epochs=12,
+        validation_data=(X_val, X_seq_val, y_val),
         verbose=0,
-        early_stopping_verbose=0,
-        class_weight=cw,
-        dropout_rates=best_cfg.dropout_rates,
-        hidden_units=best_cfg.hidden_units,
-        learning_rate=best_cfg.learning_rate,
-    )
-    imp_metrics = compute_test_metrics(improved_model, X_test, y_test)
-    print(
-        f"Test (improved)   acc={imp_metrics['accuracy']:.4f}  prec={imp_metrics['precision']:.4f}  "
-        f"rec={imp_metrics['recall']:.4f}  f1={imp_metrics['f1']:.4f}  "
-        f"| best val_loss={best_val_loss(improved_hist):.4f}"
-    )
-    print(f"  dropout={best_cfg.dropout_rates}  lr={best_cfg.learning_rate}  hidden={best_cfg.hidden_units}")
-    print()
-
-    print("=== Comparison on KDDTest (threshold 0.5) ===")
-    print(f"{'':22}  {'Acc':>8}  {'Prec':>8}  {'Rec':>8}  {'F1':>8}")
-    print(
-        f"{'Baseline':<22}  {base_metrics['accuracy']:8.4f}  {base_metrics['precision']:8.4f}  "
-        f"{base_metrics['recall']:8.4f}  {base_metrics['f1']:8.4f}"
+        class_weight=agirliklar,
+        dnn_units=en_iyi.dnn_units,
+        dropout=en_iyi.dropout,
+        learning_rate=en_iyi.learning_rate,
+        window_size=veri.window_size,
+    )  # dnn_units/dropout via build inside train_hybrid_model
+    imp_met = compute_multiclass_metrics(
+        iyilestirilmis, veri.X_test, veri.X_seq_test, veri.y_test
     )
     print(
-        f"{'Improved':<22}  {imp_metrics['accuracy']:8.4f}  {imp_metrics['precision']:8.4f}  "
-        f"{imp_metrics['recall']:8.4f}  {imp_metrics['f1']:8.4f}"
+        f"Test F1(macro)={imp_met['f1_macro']:.4f}  "
+        f"ROC-AUC={imp_met['roc_auc_ovr_macro']:.4f}"
     )
-    print()
-    print(
-        f"Delta (improved - baseline): recall {imp_metrics['recall'] - base_metrics['recall']:+.4f}, "
-        f"F1 {imp_metrics['f1'] - base_metrics['f1']:+.4f}, "
-        f"accuracy {imp_metrics['accuracy'] - base_metrics['accuracy']:+.4f}"
-    )
-    print(
-        "Tuning targeted validation attack recall with balanced class_weight and dropout; "
-        "expect higher recall with some precision/accuracy trade-off vs an unweighted baseline."
-    )
+    print(f"Δ F1 = {imp_met['f1_macro'] - taban_met['f1_macro']:+.4f}")
 
 
 if __name__ == "__main__":

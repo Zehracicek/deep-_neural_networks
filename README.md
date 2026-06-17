@@ -17,12 +17,18 @@ Bu proje, **NSL-KDD** veri kümesi üzerinde ikili sınıflandırma (**normal** 
 ## Gereksinimler
 
 - Python 3.10+ (3.12 ile test edildi)
-- Paketler: `pandas`, `numpy`, `pyarrow`, `scikit-learn`, `tensorflow`, `matplotlib`
+- Paketler: `pandas`, `numpy`, `pyarrow`, `scikit-learn`, `tensorflow`, `matplotlib`, `streamlit`
 
 Kurulum örneği:
 
 ```bash
-pip install pandas numpy pyarrow scikit-learn tensorflow matplotlib
+pip install -r requirements.txt
+```
+
+Veya manuel kurulum:
+
+```bash
+pip install pandas numpy pyarrow scikit-learn tensorflow matplotlib streamlit
 ```
 
 ## Proje yapısı
@@ -37,6 +43,7 @@ pip install pandas numpy pyarrow scikit-learn tensorflow matplotlib
 | `dnn_model.py` | Model mimarisi, eğitim (validation split, EarlyStopping), eğri grafikleri |
 | `evaluate_dnn.py` | Test tahmini ve metrikler; `confusion_matrix.png` üretimi |
 | `improve_ids.py` | Sınıf ağırlığı + Dropout + hiperparametre karşılaştırması (önce/sonra) |
+| `app.py` | 🎯 **Streamlit web arayüzü** - Model tahminlerini test etmek için interaktif UI |
 | `training_history.png` | Eğitim/doğrulama kaybı ve doğruluk grafikleri (örnek çıktı) |
 | `confusion_matrix.png` | Test karışıklık matrisi (örnek çıktı) |
 
@@ -45,6 +52,8 @@ pip install pandas numpy pyarrow scikit-learn tensorflow matplotlib
 Bu repodaki Parquet dosyaları **38 sütunluk** bir NSL-KDD türevini kullanır: `protocol_type`, `service`, `flag` kategorik; hedef olarak `class` (metin) ve `classnum` bulunur. İkili sınıflandırmada `normal` dışındaki tüm sınıflar **saldırı (1)** sayılır.
 
 ## Kullanım
+
+### Script Modunda (Command Line)
 
 Proje kök dizininde çalıştırın:
 
@@ -67,6 +76,23 @@ python evaluate_dnn.py
 # İyileştirilmiş model vs taban çizgisi karşılaştırması
 python improve_ids.py
 ```
+
+### 🎯 Web Arayüzü (Streamlit) - **Tavsiye Edilen**
+
+İnteraktif web arayüzü ile modeli test etmek için:
+
+```bash
+streamlit run app.py
+```
+
+Tarayıcıda otomatik olarak açılacak (genellikle `http://localhost:8501`).
+
+**Arayüz Özellikleri:**
+- 🎲 **Random Sample Tab:** Test kümesinden rasgele örnek yükle ve tahmin yap
+- 🖊️ **Manual Input Tab:** Özellik değerlerini manuel gir ve tahmin al
+- 📈 **Model Info Tab:** Model mimarisi ve eğitim bilgilerini görüntüle
+- 🎨 Renk kodlu sonuçlar (Yeşil=Normal, Kırmızı=Saldırı)
+- 📊 Olasılık puanı ve güven seviyesi gösterimi
 
 ## Model özeti
 
